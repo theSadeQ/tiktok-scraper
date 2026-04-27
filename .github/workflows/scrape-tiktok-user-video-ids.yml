@@ -24,10 +24,6 @@ jobs:
         with:
           node-version: 20
 
-      # This assumes the scraper is available as an npm package.
-      # If this repo itself is the scraper source code, replace this step with:
-      # npm ci
-      # npm link
       - name: Install tiktok-scraper
         run: |
           npm install -g tiktok-scraper
@@ -39,27 +35,43 @@ jobs:
       - name: Scrape TikTok user metadata
         run: |
           USERNAME="${{ github.event.inputs.username }}"
-
           echo "Scraping TikTok user: $USERNAME"
 
+          # We use --filename to try and force a consistent name, 
+          # but the script is now smart enough to find it regardless.
           tiktok-scraper user "$USERNAME" \
             --number 0 \
             --filetype json \
             --filepath ./output \
             --filename "${USERNAME}_posts"
 
+      - name: Debug - List generated files
+        run: |
+          echo "Checking directory: $(pwd)"
+          echo "Listing repository root:"
+          ls -la
+          echo "Listing output directory:"
+          ls -la output || echo "Output directory is empty or does not exist."
+
       - name: Extract video IDs
         run: |
+          # This runs your scripts/extract-video-ids.js file
           node scripts/extract-video-ids.js "${{ github.event.inputs.username }}"
 
-      - name: Commit scraped video IDs back to repository
+      - name: Commit and push results
         run: |
           USERNAME="${{ github.event.inputs.username }}"
-
+          
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
+          
+          # Add the entire output folder
           git add output/
-
-          git commit -m "Update TikTok video IDs for ${USERNAME}" || echo "No changes to commit"
-          git push
+          
+          # Only commit if there are changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update TikTok data for ${USERNAME}"
+            git push
+          fi
