@@ -1,484 +1,269 @@
-#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+const { execSync, spawnSync } = require('child_process');
 
-/**
- * collect-tiktok-debug.js
- *
- * Purpose:
- * - Run tiktok-scraper from GitHub Actions.
- * - Record what command was executed.
- * - Find JSON files created anywhere in the repo.
- * - Analyze JSON files to see if they look like TikTok scraper output.
- * - Generate a readable debug report at debug-report/report.md.
- *
- * Usage:
- *   node scripts/collect-tiktok-debug.js username 0
- *
- * Example:
- *   node scripts/collect-tiktok-debug.js tiktok 0
- */
+const username = process.argv[2] || 'tiktok';
+const number = process.argv[3] || '30';
 
-const fs = require("fs");
-const path = require("path");
-const { spawnSync } = require("child_process");
+const OUTPUT_DIR = path.resolve('output');
+const REPORT_DIR = path.resolve('debug-report');
+const REPORT_FILE = path.join(REPORT_DIR, 'report.md');
 
-const username = process.argv[2];
-const number = process.argv[3] || "0";
-
-if (!username) {
-  console.error("Missing username.");
-  console.error("Usage: node scripts/collect-tiktok-debug.js <username> <number>");
-  process.exit(1);
+function ensureDir(dir) {
+  fs.mkdirSync(dir, { recursive: true });
 }
 
-const repoRoot = process.cwd();
-const outputDir = path.join(repoRoot, "output");
-const debugDir = path.join(repoRoot, "debug-report");
-const reportPath = path.join(debugDir, "report.md");
-
-fs.mkdirSync(outputDir, { recursive: true });
-fs.mkdirSync(debugDir, { recursive: true });
-
-const reportLines = [];
-
-function writeReport(line = "") {
-  // Ensure line is a string before pushing
-  reportLines.push(String(line));
+function safeText(value) {
+  if (value === undefined || value === null) return '';
+  return String(value);
 }
 
-function saveReport() {
-  fs.writeFileSync(reportPath, reportLines.join("\n"), "utf8");
-}
-
-function runCommand(command, args, options = {}) {
-  const result = spawnSync(command, args, {
-    cwd: repoRoot,
-    encoding: "utf8",
-    shell: false,
-    ...options,
-  });
-
-  return {
-    command,
-    args,
-    status: result.status,
-    signal: result.signal,
-    stdout: result.stdout || "",
-    stderr: result.stderr || "",
-    error: result.error ? String(result.error) : "",
-  };
-}
-
-function commandExists(command) {
-  const result = spawnSync("bash", ["-lc", `command -v ${command}`], {
-    cwd: repoRoot,
-    encoding: "utf8",
-  });
-
-  return result.status === 0 ? result.stdout.trim() : "";
-}
-
-function getFileSize(filePath) {
+function shell(cmd) {
   try {
-    return fs.statSync(filePath).size;
-  } catch {
-    return 0;
+    return execSync(cmd, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe']
+    }).trim();
+  } catch (err) {
+    const stdout = err.stdout ? String(err.stdout) : '';
+    const stderr = err.stderr ? String(err.stderr) : '';
+    return [stdout, stderr].filter(Boolean).join('\n').trim();
   }
 }
 
-function walkFiles(startDir, ignoreDirs = new Set([".git", "node_modules"])) {
-  const files = [];
+function findJsonFiles(dir) {
+  const results = [];
+  if (!fs.existsSync(dir)) return results;
 
-  function walk(currentDir) {
-    let entries = [];
-
-    try {
-      entries = fs.readdirSync(currentDir, { withFileTypes: true });
-    } catch (e) {
-      console.error(`Error reading directory ${currentDir}: ${e.message}`);
-      return;
-    }
-
+  function walk(current) {
+    const entries = fs.readdirSync(current, { withFileTypes: true });
     for (const entry of entries) {
-      const fullPath = path.join(currentDir, entry.name);
-
+      const fullPath = path.join(current, entry.name);
       if (entry.isDirectory()) {
-        if (ignoreDirs.has(entry.name)) {
-          continue;
-        }
-
         walk(fullPath);
-      } else if (entry.isFile()) {
-        files.push(fullPath);
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.json')) {
+        results.push(fullPath);
       }
     }
   }
 
-  walk(startDir);
-  return files;
+  walk(dir);
+  return results.sort();
 }
 
-function findJsonFiles() {
-  return walkFiles(repoRoot)
-    .filter((file) => file.toLowerCase().endsWith(".json"))
-    .map((file) => ({
-      absolutePath: file,
-      relativePath: path.relative(repoRoot, file),
-      size: getFileSize(file),
-    }))
-    .sort((a, b) => a.relativePath.localeCompare(b.relativePath));
-}
-
-function safeJsonParse(filePath) {
-  try {
-    const content = fs.readFileSync(filePath, "utf8");
-    return {
-      ok: true,
-      value: JSON.parse(content),
-      error: "",
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      value: null,
-      error: String(error.message || error),
-    };
-  }
-}
-
-/**
- * TikTok scraper outputs can have different shapes depending on version.
- * This helper recursively searches for likely TikTok video IDs.
- */
-function collectVideoIds(value, ids = new Set()) {
-  if (value === null || typeof value === "undefined") {
-    return ids;
-  }
-
+function extractVideoIds(value, found = new Set()) {
   if (Array.isArray(value)) {
     for (const item of value) {
-      collectVideoIds(item, ids);
+      extractVideoIds(item, found);
     }
-
-    return ids;
+    return found;
   }
 
-  if (typeof value !== "object") {
-    return ids;
-  }
+  if (value && typeof value === 'object') {
+    for (const [key, v] of Object.entries(value)) {
+      const lowerKey = key.toLowerCase();
 
-  for (const [key, childValue] of Object.entries(value)) {
-    const normalizedKey = key.toLowerCase();
-
-    // Heuristic 1: Check for common ID keys and string values
-    if (
-      typeof childValue === "string" &&
-      /^\d{10,}$/.test(childValue) &&
-      [
-        "id",
-        "videoid",
-        "video_id",
-        "awemeid",
-        "aweme_id",
-        "itemid",
-        "item_id",
-        "id_str", // Added common variations
-        "uuid",
-      ].includes(normalizedKey)
-    ) {
-      ids.add(childValue);
-    }
-
-    // Heuristic 2: Check for common ID keys and numeric values (convert to string)
-    if (
-      typeof childValue === "number" &&
-      Number.isFinite(childValue) &&
-      String(childValue).length >= 10 &&
-      [
-        "id",
-        "videoid",
-        "video_id",
-        "awemeid",
-        "aweme_id",
-        "itemid",
-        "item_id",
-        "id_str",
-        "uuid",
-      ].includes(normalizedKey)
-    ) {
-      ids.add(String(childValue));
-    }
-
-    // Recurse into nested objects/arrays
-    collectVideoIds(childValue, ids);
-  }
-
-  return ids;
-}
-
-function countObjects(value) {
-  let count = 0;
-
-  function visit(item) {
-    if (item === null || typeof item === "undefined") {
-      return;
-    }
-
-    if (Array.isArray(item)) {
-      for (const child of item) {
-        visit(child);
-      }
-      return;
-    }
-
-    if (typeof item === "object") {
-      count += 1; // Count the object itself
-      for (const child of Object.values(item)) {
-        visit(child);
-      }
-    }
-  }
-
-  visit(value);
-  return count;
-}
-
-function analyzeJsonFile(fileInfo) {
-  const parsed = safeJsonParse(fileInfo.absolutePath);
-
-  if (!parsed.ok) {
-    return {
-      ...fileInfo,
-      validJson: false,
-      parseError: parsed.error,
-      rootType: "unknown",
-      possibleVideoIds: [],
-      objectCount: 0,
-    };
-  }
-
-  const root = parsed.value;
-  const possibleVideoIds = Array.from(collectVideoIds(root));
-  const objectCount = countObjects(root);
-
-  let rootType = typeof root;
-
-  if (Array.isArray(root)) {
-    rootType = `array(${root.length})`;
-  } else if (root && typeof root === "object") {
-    rootType = `object(${Object.keys(root).length} keys)`;
-  }
-
-  return {
-    ...fileInfo,
-    validJson: true,
-    parseError: "",
-    rootType,
-    possibleVideoIds,
-    objectCount,
-  };
-}
-
-function writeCommandResult(title, result) {
-  writeReport(`### ${title}`);
-  writeReport("");
-  writeReport(`\`\`\`bash
-${result.command} ${result.args.join(" ")}
-\`\`\``);
-  writeReport(`Exit code: \`${result.status}\``);
-
-  if (result.signal) {
-    writeReport(`Signal: \`${result.signal}\``);
-  }
-
-  if (result.error) {
-    writeReport("");
-    writeReport("Error:");
-    writeReport("
-```text");
-writeReport(result.error);
-writeReport("
-```");
-  }
-
-  if (result.stdout.trim()) {
-    writeReport("");
-    writeReport("stdout:");
-    writeReport("
-```text");
-writeReport(result.stdout.trim());
-writeReport("
-```");
-  }
-
-  if (result.stderr.trim()) {
-    writeReport("");
-    writeReport("stderr:");
-    writeReport("
-```text");
-writeReport(result.stderr.trim());
-writeReport("
-```");
-  }
-}
-
-async function main() {
-  writeReport("# TikTok Scraper Debug Report");
-  writeReport("");
-  writeReport(`Generated on: ${new Date().toISOString()}`);
-  writeReport("");
-
-  // 1. Environment and Tool Versions
-  writeReport("## Environment and Tool Versions");
-  writeReport("");
-
-  const nodeVersion = runCommand("node", ["-v"]);
-  writeCommandResult("Node.js Version", nodeVersion);
-
-  const npmVersion = runCommand("npm", ["-v"]);
-  writeCommandResult("npm Version", npmVersion);
-
-  const tiktokScraperVersion = runCommand("tiktok-scraper", ["--version"]);
-  writeCommandResult("tiktok-scraper Version", tiktokScraperVersion);
-
-  // 2. Files before scraping
-  writeReport("");
-  writeReport("## Files Before Scraping");
-  writeReport("");
-
-  const initialJsonFiles = findJsonFiles();
-  if (initialJsonFiles.length > 0) {
-    writeReport("Found the following JSON files before scraping:");
-    writeReport("
-```");
-initialJsonFiles.forEach(f => writeReport(`- ${f.relativePath} (${f.size} bytes)`));
-writeReport("
-```");
-  } else {
-    writeReport("No JSON files found before scraping.");
-  }
-
-  // 3. Run tiktok-scraper command
-  writeReport("");
-  writeReport("## Running TikTok Scraper");
-  writeReport("");
-
-  const scraperArgs = [username];
-  if (number !== "0") {
-    scraperArgs.push("--number", number);
-  }
-  scraperArgs.push("--filetype", "json");
-  scraperArgs.push("--filepath", "./output"); // Explicitly set to output
-  scraperArgs.push("--filename", `${username}_posts`);
-
-  const scraperCommand = "tiktok-scraper";
-  const scraperResult = runCommand(scraperCommand, scraperArgs);
-  writeCommandResult("tiktok-scraper Execution", scraperResult);
-
-  // 4. Files after scraping
-  writeReport("");
-  writeReport("## Files After Scraping");
-  writeReport("");
-
-  const finalJsonFiles = findJsonFiles();
-
-  if (finalJsonFiles.length > 0) {
-    const foundInOutput = finalJsonFiles.filter(f => f.relativePath.startsWith("output/"));
-    const foundElsewhere = finalJsonFiles.filter(f => !f.relativePath.startsWith("output/"));
-
-    writeReport(`Found a total of ${finalJsonFiles.length} JSON files after scraping.`);
-
-    if (foundInOutput.length > 0) {
-      writeReport(`\n### JSON files found in './output/': ${foundInOutput.length}`);
-      writeReport("
-```");
-foundInOutput.forEach(f => writeReport(`- ${f.relativePath} (${f.size} bytes)`));
-writeReport("
-```");
-    } else {
-      writeReport("\nNo JSON files were found in the './output/' directory.");
-    }
-
-    if (foundElsewhere.length > 0) {
-      writeReport(`\n### JSON files found ELSEWHERE in the repository: ${foundElsewhere.length}`);
-      writeReport("
-```");
-foundElsewhere.forEach(f => writeReport(`- ${f.relativePath} (${f.size} bytes)`));
-writeReport("
-```");
-      writeReport("\n**Note:** The scraper may have written files outside of the expected './output/' directory.");
-    }
-  } else {
-    writeReport("No JSON files found anywhere in the repository after scraping.");
-  }
-
-  // 5. Analyze JSON files for video IDs
-  writeReport("");
-  writeReport("## Analysis of JSON Files");
-  writeReport("");
-
-  const analyzedFiles = finalJsonFiles.map(analyzeJsonFile);
-
-  if (analyzedFiles.length === 0) {
-    writeReport("No JSON files to analyze.");
-  } else {
-    let totalPossibleIds = 0;
-    let totalObjects = 0;
-
-    analyzedFiles.forEach(fileInfo => {
-      writeReport(`### Analysis of: \`${fileInfo.relativePath}\``);
-      writeReport("");
-      writeReport(`- Valid JSON: ${fileInfo.validJson ? "Yes" : "No"}`);
-      if (!fileInfo.validJson) {
-        writeReport(`- Parse Error: \`${fileInfo.parseError}\``);
-      } else {
-        writeReport(`- Root Type: \`${fileInfo.rootType}\``);
-        writeReport(`- Object Count: \`${fileInfo.objectCount}\``);
-        totalObjects += fileInfo.objectCount;
-
-        if (fileInfo.possibleVideoIds.length > 0) {
-          writeReport(`- Possible Video IDs found: ${fileInfo.possibleVideoIds.length}`);
-          // Optionally list some IDs if there aren't too many
-          if (fileInfo.possibleVideoIds.length <= 5) {
-            writeReport("  - IDs: " + fileInfo.possibleVideoIds.join(", "));
-          } else {
-            writeReport("  - (Too many to list)");
-          }
-          totalPossibleIds += fileInfo.possibleVideoIds.length;
-        } else {
-          writeReport("- Possible Video IDs found: 0");
+      if (
+        (lowerKey === 'id' || lowerKey === 'videoid' || lowerKey === 'awemeid') &&
+        (typeof v === 'string' || typeof v === 'number')
+      ) {
+        const s = String(v);
+        if (/^\d{8,}$/.test(s)) {
+          found.add(s);
         }
       }
-      writeReport("");
-    });
 
-    writeReport("---");
-    writeReport("### Summary of Analysis");
-    writeReport("");
-    writeReport(`- Total JSON files analyzed: ${analyzedFiles.length}`);
-    writeReport(`- Total objects found across analyzed JSONs: ${totalObjects}`);
-    writeReport(`- Total possible TikTok video IDs found: ${totalPossibleIds}`);
+      extractVideoIds(v, found);
+    }
+    return found;
   }
 
-  // 6. Final Report Save
-  saveReport();
-  writeReport(`Debug report saved to: \`${path.relative(repoRoot, reportPath)}\``);
-  console.log(`Debug report generated at: ${reportPath}`);
+  if (typeof value === 'string') {
+    const matches = value.match(/\b\d{8,}\b/g);
+    if (matches) {
+      for (const m of matches) {
+        found.add(m);
+      }
+    }
+  }
+
+  return found;
 }
 
-main().catch((error) => {
-  console.error("An unexpected error occurred during script execution:");
-  console.error(error);
+function analyzeJsonFile(filePath) {
+  const info = {
+    file: filePath,
+    size: 0,
+    validJson: false,
+    topLevelType: '',
+    keys: [],
+    videoIds: [],
+    parseError: ''
+  };
 
-  // Attempt to write the error to the report
-  writeReport("## Unhandled Script Error");
-  writeReport("");
-  writeReport("An unexpected error occurred while running the debug script:");
-  writeReport("
-```text");
-  writeReport(String(error.stack || error));
-  writeReport("
-```");
-  saveReport(); // Save report even if there's an error
+  try {
+    const stat = fs.statSync(filePath);
+    info.size = stat.size;
 
-  process.exitCode = 1; // Indicate failure
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const parsed = JSON.parse(raw);
+
+    info.validJson = true;
+    info.topLevelType = Array.isArray(parsed) ? 'array' : typeof parsed;
+
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      info.keys = Object.keys(parsed).slice(0, 30);
+    }
+
+    info.videoIds = Array.from(extractVideoIds(parsed)).sort();
+  } catch (err) {
+    info.parseError = err.message || String(err);
+  }
+
+  return info;
+}
+
+function writeReport(lines) {
+  ensureDir(REPORT_DIR);
+  fs.writeFileSync(REPORT_FILE, lines.join('\n') + '\n', 'utf8');
+}
+
+function codeBlock(text) {
+  return ['
+```', safeText(text), '
+```'];
+}
+
+ensureDir(OUTPUT_DIR);
+ensureDir(REPORT_DIR);
+
+const lines = [];
+lines.push('# TikTok Debug Report');
+lines.push('');
+lines.push(`- Username: \`${username}\``);
+lines.push(`- Requested count: \`${number}\``);
+lines.push(`- Generated at: \`${new Date().toISOString()}\``);
+lines.push('');
+
+lines.push('## Environment');
+lines.push('');
+lines.push(`- Node.js: \`${shell('node -v')}\``);
+lines.push(`- npm: \`${shell('npm -v')}\``);
+lines.push(`- tiktok-scraper: \`${shell('tiktok-scraper --version || true')}\``);
+lines.push(`- Working directory: \`${process.cwd()}\``);
+lines.push('');
+
+const beforeJson = findJsonFiles(OUTPUT_DIR);
+lines.push('## JSON files before scraping');
+lines.push('');
+if (beforeJson.length === 0) {
+  lines.push('- None');
+} else {
+  for (const file of beforeJson) {
+    lines.push(`- \`${file}\``);
+  }
+}
+lines.push('');
+
+const command = [
+  'tiktok-scraper user',
+  `-u "${username}"`,
+  `-n ${number}`,
+  '-t json',
+  '-d',
+  `"${OUTPUT_DIR}"`
+].join(' ');
+
+lines.push('## Command');
+lines.push('');
+lines.push(...codeBlock(command));
+lines.push('');
+
+const result = spawnSync('bash', ['-lc', command], {
+  encoding: 'utf8',
+  maxBuffer: 20 * 1024 * 1024
 });
+
+lines.push('## Exit status');
+lines.push('');
+lines.push(`- Exit code: \`${result.status}\``);
+lines.push(`- Signal: \`${result.signal || ''}\``);
+lines.push('');
+
+lines.push('## STDOUT');
+lines.push('');
+lines.push(...codeBlock(result.stdout || ''));
+lines.push('');
+
+lines.push('## STDERR');
+lines.push('');
+lines.push(...codeBlock(result.stderr || ''));
+lines.push('');
+
+const afterJson = findJsonFiles(OUTPUT_DIR);
+lines.push('## JSON files after scraping');
+lines.push('');
+if (afterJson.length === 0) {
+  lines.push('- None');
+} else {
+  for (const file of afterJson) {
+    const size = fs.statSync(file).size;
+    lines.push(`- \`${file}\` (${size} bytes)`);
+  }
+}
+lines.push('');
+
+lines.push('## JSON analysis');
+lines.push('');
+if (afterJson.length === 0) {
+  lines.push('No JSON files were produced in the output directory.');
+  lines.push('');
+  lines.push('Possible reasons:');
+  lines.push('- TikTok blocked the runner IP');
+  lines.push('- tiktok-scraper failed internally');
+  lines.push('- The scraper wrote files somewhere else');
+  lines.push('- The output format or command options are different than expected');
+} else {
+  for (const file of afterJson) {
+    const analyzed = analyzeJsonFile(file);
+    lines.push(`### \`${file}\``);
+    lines.push('');
+    lines.push(`- Size: \`${analyzed.size}\` bytes`);
+    lines.push(`- Valid JSON: \`${analyzed.validJson}\``);
+
+    if (analyzed.validJson) {
+      lines.push(`- Top-level type: \`${analyzed.topLevelType}\``);
+      if (analyzed.keys.length > 0) {
+        lines.push(`- Top-level keys: \`${analyzed.keys.join(', ')}\``);
+      }
+      lines.push(`- Video IDs found: \`${analyzed.videoIds.length}\``);
+
+      if (analyzed.videoIds.length > 0) {
+        lines.push('');
+        lines.push('First video IDs found:');
+        lines.push('');
+        for (const id of analyzed.videoIds.slice(0, 50)) {
+          lines.push(`- \`${id}\``);
+        }
+      }
+    } else {
+      lines.push(`- Parse error: \`${analyzed.parseError}\``);
+    }
+
+    lines.push('');
+  }
+}
+
+lines.push('## Directory tree');
+lines.push('');
+lines.push(...codeBlock(shell('find . -maxdepth 3 -type f | sort')));
+lines.push('');
+
+writeReport(lines);
+
+console.log(`Debug report written to: ${REPORT_FILE}`);
+
+if (afterJson.length === 0) {
+  console.error('No JSON files found in output directory after scraping.');
+  process.exit(1);
+}
