@@ -1,0 +1,55 @@
+name: Debug TikTok Scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: "TikTok username without @"
+        required: true
+        type: string
+      number:
+        description: "Number of videos to test"
+        required: false
+        default: "30"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install tiktok-scraper
+        run: |
+          npm install -g tiktok-scraper
+
+      - name: Run TikTok debug collector
+        run: |
+          mkdir -p scripts
+          node scripts/collect-tiktok-debug.js "${{ github.event.inputs.username }}" "${{ github.event.inputs.number }}"
+
+      - name: Show debug report in logs
+        if: always()
+        run: |
+          echo "===== debug-report/report.md ====="
+          cat debug-report/report.md || true
+
+      - name: Upload debug report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tiktok-debug-report-${{ github.event.inputs.username }}
+          path: |
+            debug-report/
+            output/
+          if-no-files-found: warn
