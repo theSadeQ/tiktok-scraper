@@ -10,7 +10,7 @@ on:
       number:
         description: "Number of videos to scrape"
         required: false
-        default: "100"
+        default: "30"
         type: string
 
 permissions:
@@ -29,22 +29,28 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install tiktok-scraper
+      - name: Install dependencies
         run: |
           npm install -g tiktok-scraper
+          node --version
+          npm --version
+          tiktok-scraper --version || true
 
       - name: Prepare output directory
         run: |
           rm -rf output
           mkdir -p output
 
-      - name: Scrape TikTok user metadata
+      - name: Run TikTok scraper
         run: |
+          set -euxo pipefail
+
           USERNAME="${{ github.event.inputs.username }}"
           NUMBER="${{ github.event.inputs.number }}"
 
-          echo "Scraping TikTok user: $USERNAME"
-          echo "Number of videos requested: $NUMBER"
+          echo "Username: $USERNAME"
+          echo "Number: $NUMBER"
+          echo "Working directory: $(pwd)"
 
           tiktok-scraper user "$USERNAME" \
             --number "$NUMBER" \
@@ -52,39 +58,55 @@ jobs:
             --filepath ./output \
             --filename "${USERNAME}_posts"
 
-      - name: Debug - Show generated files
+      - name: Debug files after scraping
+        if: always()
         run: |
-          echo "Current directory:"
-          pwd
-
           echo "Repository root:"
           ls -la
 
+          echo ""
           echo "Output directory:"
           ls -la output || true
 
-          echo "Searching for JSON files anywhere in repository:"
-          find . -type f -name "*.json" -print
+          echo ""
+          echo "All JSON files in repository:"
+          find . -type f -name "*.json" -print || true
+
+          echo ""
+          echo "All files in repository up to depth 3:"
+          find . -maxdepth 3 -type f | sort || true
 
       - name: Verify scraper produced JSON
         run: |
-          JSON_COUNT=$(find output -type f -name "*.json" | wc -l)
+          OUTPUT_JSON_COUNT=$(find output -type f -name "*.json" | wc -l)
+          ANY_JSON_COUNT=$(find . -type f -name "*.json" | wc -l)
 
-          echo "JSON files found in output/: $JSON_COUNT"
+          echo "JSON files found in output/: $OUTPUT_JSON_COUNT"
+          echo "JSON files found anywhere: $ANY_JSON_COUNT"
 
-          if [ "$JSON_COUNT" -eq 0 ]; then
-            echo "No JSON files were created by tiktok-scraper."
-            echo "This usually means one of these happened:"
-            echo "1. TikTok blocked the GitHub Actions runner."
-            echo "2. The username is incorrect or private."
-            echo "3. tiktok-scraper is outdated/broken."
-            echo "4. The scraper command produced no result."
+          if [ "$OUTPUT_JSON_COUNT" -eq 0 ]; then
+            echo "No JSON files were created in output/."
+            echo "Possible causes:"
+            echo "1. TikTok blocked the GitHub runner"
+            echo "2. Username is invalid or private"
+            echo "3. tiktok-scraper failed"
+            echo "4. scraper wrote files somewhere unexpected"
             exit 1
           fi
 
       - name: Extract video IDs
         run: |
           node scripts/extract-video-ids.js "${{ github.event.inputs.username }}"
+
+      - name: Upload output artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tiktok-output-${{ github.event.inputs.username }}
+          path: |
+            output
+            *.json
+          if-no-files-found: warn
 
       - name: Commit and push results
         run: |
