@@ -1,0 +1,65 @@
+name: Scrape TikTok User Video IDs
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: "TikTok username without @"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # This assumes the scraper is available as an npm package.
+      # If this repo itself is the scraper source code, replace this step with:
+      # npm ci
+      # npm link
+      - name: Install tiktok-scraper
+        run: |
+          npm install -g tiktok-scraper
+
+      - name: Prepare output directory
+        run: |
+          mkdir -p output
+
+      - name: Scrape TikTok user metadata
+        run: |
+          USERNAME="${{ github.event.inputs.username }}"
+
+          echo "Scraping TikTok user: $USERNAME"
+
+          tiktok-scraper user "$USERNAME" \
+            --number 0 \
+            --filetype json \
+            --filepath ./output \
+            --filename "${USERNAME}_posts"
+
+      - name: Extract video IDs
+        run: |
+          node scripts/extract-video-ids.js "${{ github.event.inputs.username }}"
+
+      - name: Commit scraped video IDs back to repository
+        run: |
+          USERNAME="${{ github.event.inputs.username }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add output/
+
+          git commit -m "Update TikTok video IDs for ${USERNAME}" || echo "No changes to commit"
+          git push
