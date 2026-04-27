@@ -321,4 +321,63 @@ function main() {
   addLine(lines, '## JSON analysis');
   addBlank(lines);
 
-  if (json
+  if (jsonFiles.length === 0) {
+    addLine(lines, 'No JSON files to analyze.');
+  } else {
+    for (const filePath of jsonFiles) {
+      const info = analyzeJsonFile(filePath);
+
+      addLine(lines, '### `' + filePath + '`');
+      addBlank(lines);
+
+      addLine(lines, '- Size: `' + String(info.size) + ' bytes`');
+      addLine(lines, '- Valid JSON: `' + String(info.validJson) + '`');
+
+      if (info.validJson) {
+        addLine(lines, '- Top-level type: `' + info.topLevelType + '`');
+
+        if (info.topLevelKeys.length > 0) {
+          addLine(lines, '- Top-level keys: `' + info.topLevelKeys.join(', ') + '`');
+        } else {
+          addLine(lines, '- Top-level keys: none');
+        }
+
+        addLine(lines, '- Numeric IDs found: `' + String(info.ids.length) + '`');
+
+        if (info.ids.length > 0) {
+          addBlank(lines);
+          addLine(lines, 'First detected IDs:');
+          addBlank(lines);
+
+          for (const id of info.ids.slice(0, 50)) {
+            addLine(lines, '- `' + id + '`');
+          }
+        }
+      } else {
+        addLine(lines, '- Parse error: `' + info.parseError + '`');
+        addBlank(lines);
+        addLine(lines, 'Preview:');
+        addBlank(lines);
+        addCodeBlock(lines, info.preview);
+      }
+
+      addBlank(lines);
+    }
+  }
+
+  writeReport(lines);
+
+  console.log('Debug report written to ' + REPORT_FILE);
+
+  if (jsonFiles.length === 0) {
+    console.error('No JSON files were produced.');
+    process.exit(1);
+  }
+
+  if (finalRun.status !== 0) {
+    console.error('Scraper exited with non-zero status.');
+    process.exit(finalRun.status || 1);
+  }
+}
+
+main();
