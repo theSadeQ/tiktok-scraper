@@ -1,10 +1,12 @@
 const fs = require('fs');
 const path = require('path');
-const { execSync, spawnSync } = require('child_process');
+const { spawnSync } = require('child_process');
 
-const username = process.argv[2] || 'tiktok';
-const requestedNumberRaw = process.argv[3] || '30';
-const requestedNumber = String(requestedNumberRaw).replace(/[^0-9]/g, '') || '30';
+const rawUsername = process.argv[2] || 'tiktok';
+const rawNumber = process.argv[3] || '30';
+
+const username = String(rawUsername).replace(/^@+/, '').trim() || 'tiktok';
+const requestedNumber = String(rawNumber).replace(/[^0-9]/g, '') || '30';
 
 const OUTPUT_DIR = path.resolve('output');
 const REPORT_DIR = path.resolve('debug-report');
@@ -14,44 +16,73 @@ function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
 }
 
-function toText(value) {
+function text(value) {
   if (value === undefined || value === null) {
     return '';
   }
   return String(value);
 }
 
-function safeCommandArg(value) {
-  return String(value).replace(/"/g, '\\"');
+function addLine(lines, value) {
+  lines.push(text(value));
 }
 
-function runCommandCapture(command) {
-  try {
-    return execSync(command, {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe']
-    }).trim();
-  } catch (error) {
-    const stdout = error && error.stdout ? String(error.stdout) : '';
-    const stderr = error && error.stderr ? String(error.stderr) : '';
-    return [stdout, stderr].filter(Boolean).join('\n').trim();
-  }
+function addBlank(lines) {
+  lines.push('');
 }
 
-function listFilesRecursive(dirPath) {
+function addCodeBlock(lines, content) {
+  lines.push('~~~');
+  lines.push(text(content));
+  lines.push('~~~');
+}
+
+function runCommand(command, args) {
+  const result = spawnSync(command, args, {
+    encoding: 'utf8',
+    shell: false,
+    maxBuffer: 20 * 1024 * 1024
+  });
+
+  return {
+    command: command,
+    args: args,
+    status: result.status,
+    signal: result.signal,
+    error: result.error ? text(result.error.message || result.error) : '',
+    stdout: result.stdout || '',
+    stderr: result.stderr || ''
+  };
+}
+
+function commandToString(command, args) {
+  return [command].concat(args).join(' ');
+}
+
+function listFilesRecursive(startDir) {
   const results = [];
 
-  if (!fs.existsSync(dirPath)) {
+  if (!fs.existsSync(startDir)) {
     return results;
   }
 
-  function walk(currentPath) {
-    const entries = fs.readdirSync(currentPath, { withFileTypes: true });
+  function walk(currentDir) {
+    let entries = [];
+
+    try {
+      entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    } catch (error) {
+      return;
+    }
 
     for (const entry of entries) {
-      const fullPath = path.join(currentPath, entry.name);
+      const fullPath = path.join(currentDir, entry.name);
 
       if (entry.isDirectory()) {
+        if (entry.name === '.git' || entry.name === 'node_modules') {
+          continue;
+        }
+
         walk(fullPath);
       } else if (entry.isFile()) {
         results.push(fullPath);
@@ -59,42 +90,50 @@ function listFilesRecursive(dirPath) {
     }
   }
 
-  walk(dirPath);
+  walk(startDir);
   return results.sort();
 }
 
-function findJsonFiles(dirPath) {
-  return listFilesRecursive(dirPath).filter((filePath) =>
-    filePath.toLowerCase().endsWith('.json')
-  );
+function findJsonFiles(startDir) {
+  return listFilesRecursive(startDir).filter(function (filePath) {
+    return filePath.toLowerCase().endsWith('.json');
+  });
 }
 
-function extractNumericIdsDeep(value, found = new Set()) {
+function extractIds(value, found) {
+  if (!found) {
+    found = new Set();
+  }
+
   if (Array.isArray(value)) {
     for (const item of value) {
-      extractNumericIdsDeep(item, found);
+      extractIds(item, found);
     }
+
     return found;
   }
 
   if (value && typeof value === 'object') {
-    for (const [key, childValue] of Object.entries(value)) {
+    for (const key of Object.keys(value)) {
+      const childValue = value[key];
       const lowerKey = key.toLowerCase();
 
       if (
-        (lowerKey === 'id' ||
-          lowerKey === 'videoid' ||
-          lowerKey === 'awemeid' ||
-          lowerKey === 'itemid') &&
-        (typeof childValue === 'string' || typeof childValue === 'number')
+        lowerKey === 'id' ||
+        lowerKey === 'videoid' ||
+        lowerKey === 'awemeid' ||
+        lowerKey === 'itemid'
       ) {
-        const candidate = String(childValue);
-        if (/^\d{8,}$/.test(candidate)) {
-          found.add(candidate);
+        if (typeof childValue === 'string' || typeof childValue === 'number') {
+          const possibleId = String(childValue);
+
+          if (/^\d{8,}$/.test(possibleId)) {
+            found.add(possibleId);
+          }
         }
       }
 
-      extractNumericIdsDeep(childValue, found);
+      extractIds(childValue, found);
     }
 
     return found;
@@ -102,6 +141,7 @@ function extractNumericIdsDeep(value, found = new Set()) {
 
   if (typeof value === 'string') {
     const matches = value.match(/\b\d{8,}\b/g);
+
     if (matches) {
       for (const match of matches) {
         found.add(match);
@@ -113,50 +153,65 @@ function extractNumericIdsDeep(value, found = new Set()) {
 }
 
 function analyzeJsonFile(filePath) {
-  const analysis = {
-    filePath,
+  const info = {
+    filePath: filePath,
     size: 0,
     validJson: false,
+    parseError: '',
     topLevelType: '',
     topLevelKeys: [],
-    videoIds: [],
-    parseError: '',
+    ids: [],
     preview: ''
   };
 
   try {
     const stat = fs.statSync(filePath);
-    analysis.size = stat.size;
+    info.size = stat.size;
 
     const raw = fs.readFileSync(filePath, 'utf8');
-    analysis.preview = raw.slice(0, 1000);
+    info.preview = raw.slice(0, 1200);
 
     const parsed = JSON.parse(raw);
 
-    analysis.validJson = true;
-    analysis.topLevelType = Array.isArray(parsed) ? 'array' : typeof parsed;
+    info.validJson = true;
+    info.topLevelType = Array.isArray(parsed) ? 'array' : typeof parsed;
 
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      analysis.topLevelKeys = Object.keys(parsed).slice(0, 50);
+      info.topLevelKeys = Object.keys(parsed).slice(0, 40);
     }
 
-    analysis.videoIds = Array.from(extractNumericIdsDeep(parsed)).sort();
+    info.ids = Array.from(extractIds(parsed)).sort();
   } catch (error) {
-    analysis.parseError = error && error.message ? error.message : String(error);
+    info.parseError = text(error && error.message ? error.message : error);
   }
 
-  return analysis;
-}
-
-function addCodeBlock(lines, content) {
-  lines.push('~~~');
-  lines.push(toText(content));
-  lines.push('~~~');
+  return info;
 }
 
 function writeReport(lines) {
   ensureDir(REPORT_DIR);
   fs.writeFileSync(REPORT_FILE, lines.join('\n') + '\n', 'utf8');
+}
+
+function addRunResult(lines, title, result) {
+  addLine(lines, '## ' + title);
+  addBlank(lines);
+
+  addLine(lines, '- Command: `' + commandToString(result.command, result.args) + '`');
+  addLine(lines, '- Exit code: `' + text(result.status) + '`');
+  addLine(lines, '- Signal: `' + text(result.signal) + '`');
+  addLine(lines, '- Error object: `' + text(result.error) + '`');
+  addBlank(lines);
+
+  addLine(lines, '### STDOUT');
+  addBlank(lines);
+  addCodeBlock(lines, result.stdout);
+  addBlank(lines);
+
+  addLine(lines, '### STDERR');
+  addBlank(lines);
+  addCodeBlock(lines, result.stderr);
+  addBlank(lines);
 }
 
 function main() {
@@ -165,183 +220,105 @@ function main() {
 
   const lines = [];
 
-  lines.push('# TikTok Debug Report');
-  lines.push('');
-  lines.push('- Username: ' + username);
-  lines.push('- Requested count: ' + requestedNumber);
-  lines.push('- Generated at: ' + new Date().toISOString());
-  lines.push('');
+  addLine(lines, '# TikTok Debug Report');
+  addBlank(lines);
 
-  lines.push('## Environment');
-  lines.push('');
-  lines.push('- Node.js: ' + runCommandCapture('node -v'));
-  lines.push('- npm: ' + runCommandCapture('npm -v'));
-  lines.push('- tiktok-scraper: ' + runCommandCapture('tiktok-scraper --version || true'));
-  lines.push('- Working directory: ' + process.cwd());
-  lines.push('');
+  addLine(lines, '- Username: `' + username + '`');
+  addLine(lines, '- Requested number: `' + requestedNumber + '`');
+  addLine(lines, '- Generated at: `' + new Date().toISOString() + '`');
+  addLine(lines, '- Working directory: `' + process.cwd() + '`');
+  addBlank(lines);
 
-  const filesBefore = listFilesRecursive('.');
-  const jsonBefore = findJsonFiles(OUTPUT_DIR);
+  const nodeVersion = runCommand('node', ['-v']);
+  const npmVersion = runCommand('npm', ['-v']);
+  const scraperVersion = runCommand('tiktok-scraper', ['--version']);
 
-  lines.push('## Files before scraping');
-  lines.push('');
-  if (filesBefore.length === 0) {
-    lines.push('- None');
+  addRunResult(lines, 'Node version', nodeVersion);
+  addRunResult(lines, 'NPM version', npmVersion);
+  addRunResult(lines, 'TikTok scraper version', scraperVersion);
+
+  addLine(lines, '## Files before scraper run');
+  addBlank(lines);
+
+  const beforeFiles = listFilesRecursive('.');
+  if (beforeFiles.length === 0) {
+    addLine(lines, '- No files found.');
   } else {
-    for (const filePath of filesBefore.slice(0, 200)) {
-      lines.push('- ' + filePath);
+    for (const filePath of beforeFiles.slice(0, 250)) {
+      addLine(lines, '- `' + filePath + '`');
     }
-    if (filesBefore.length > 200) {
-      lines.push('- ... (' + (filesBefore.length - 200) + ' more files)');
+
+    if (beforeFiles.length > 250) {
+      addLine(lines, '- More files omitted: `' + String(beforeFiles.length - 250) + '`');
     }
   }
-  lines.push('');
 
-  lines.push('## JSON files before scraping');
-  lines.push('');
-  if (jsonBefore.length === 0) {
-    lines.push('- None');
+  addBlank(lines);
+
+  const firstArgs = ['user', username, '-n', requestedNumber, '-t', 'json', '-d', OUTPUT_DIR];
+  const firstRun = runCommand('tiktok-scraper', firstArgs);
+
+  addRunResult(lines, 'Scraper attempt 1', firstRun);
+
+  let finalRun = firstRun;
+
+  if (firstRun.status !== 0) {
+    const secondArgs = ['user', '-u', username, '-n', requestedNumber, '-t', 'json', '-d', OUTPUT_DIR];
+    const secondRun = runCommand('tiktok-scraper', secondArgs);
+
+    addRunResult(lines, 'Scraper attempt 2', secondRun);
+
+    finalRun = secondRun;
+  }
+
+  addLine(lines, '## Files after scraper run');
+  addBlank(lines);
+
+  const afterFiles = listFilesRecursive('.');
+  if (afterFiles.length === 0) {
+    addLine(lines, '- No files found.');
   } else {
-    for (const filePath of jsonBefore) {
-      lines.push('- ' + filePath);
+    for (const filePath of afterFiles.slice(0, 300)) {
+      addLine(lines, '- `' + filePath + '`');
+    }
+
+    if (afterFiles.length > 300) {
+      addLine(lines, '- More files omitted: `' + String(afterFiles.length - 300) + '`');
     }
   }
-  lines.push('');
 
-  const scraperCommand = [
-    'tiktok-scraper user',
-    '-u "' + safeCommandArg(username) + '"',
-    '-n ' + requestedNumber,
-    '-t json',
-    '-d "' + safeCommandArg(OUTPUT_DIR) + '"'
-  ].join(' ');
+  addBlank(lines);
 
-  lines.push('## Scraper command');
-  lines.push('');
-  addCodeBlock(lines, scraperCommand);
-  lines.push('');
+  const jsonFiles = findJsonFiles(OUTPUT_DIR);
 
-  const result = spawnSync('bash', ['-lc', scraperCommand], {
-    encoding: 'utf8',
-    maxBuffer: 20 * 1024 * 1024
-  });
+  addLine(lines, '## JSON files found in output directory');
+  addBlank(lines);
 
-  lines.push('## Scraper result');
-  lines.push('');
-  lines.push('- Exit code: ' + String(result.status));
-  lines.push('- Signal: ' + toText(result.signal));
-  lines.push('- Error object: ' + (result.error ? toText(result.error.message || result.error) : ''));
-  lines.push('');
-
-  lines.push('## STDOUT');
-  lines.push('');
-  addCodeBlock(lines, result.stdout || '');
-  lines.push('');
-
-  lines.push('## STDERR');
-  lines.push('');
-  addCodeBlock(lines, result.stderr || '');
-  lines.push('');
-
-  const filesAfter = listFilesRecursive('.');
-  const jsonAfter = findJsonFiles(OUTPUT_DIR);
-
-  lines.push('## Files after scraping');
-  lines.push('');
-  if (filesAfter.length === 0) {
-    lines.push('- None');
+  if (jsonFiles.length === 0) {
+    addLine(lines, 'No JSON files were found in the output directory.');
+    addBlank(lines);
+    addLine(lines, 'This usually means one of these happened:');
+    addLine(lines, '- TikTok blocked the GitHub Actions runner.');
+    addLine(lines, '- `tiktok-scraper` failed.');
+    addLine(lines, '- The scraper wrote files somewhere else.');
+    addLine(lines, '- The scraper command syntax is different for the installed version.');
   } else {
-    for (const filePath of filesAfter.slice(0, 300)) {
-      lines.push('- ' + filePath);
-    }
-    if (filesAfter.length > 300) {
-      lines.push('- ... (' + (filesAfter.length - 300) + ' more files)');
-    }
-  }
-  lines.push('');
+    for (const filePath of jsonFiles) {
+      let size = 'unknown';
 
-  lines.push('## JSON files after scraping');
-  lines.push('');
-  if (jsonAfter.length === 0) {
-    lines.push('- None');
-  } else {
-    for (const filePath of jsonAfter) {
-      let sizeText = '';
       try {
-        const stat = fs.statSync(filePath);
-        sizeText = ' (' + stat.size + ' bytes)';
+        size = String(fs.statSync(filePath).size);
       } catch (error) {
-        sizeText = ' (size unavailable)';
-      }
-      lines.push('- ' + filePath + sizeText);
-    }
-  }
-  lines.push('');
-
-  lines.push('## JSON analysis');
-  lines.push('');
-  if (jsonAfter.length === 0) {
-    lines.push('No JSON files were created in the output directory.');
-    lines.push('');
-    lines.push('Possible reasons:');
-    lines.push('- TikTok blocked the request from the GitHub Actions runner.');
-    lines.push('- tiktok-scraper failed internally.');
-    lines.push('- The tool wrote output somewhere unexpected.');
-    lines.push('- The command-line options are not behaving as expected in this environment.');
-    lines.push('');
-  } else {
-    for (const filePath of jsonAfter) {
-      const analysis = analyzeJsonFile(filePath);
-
-      lines.push('### ' + filePath);
-      lines.push('');
-      lines.push('- Size: ' + analysis.size + ' bytes');
-      lines.push('- Valid JSON: ' + String(analysis.validJson));
-
-      if (analysis.validJson) {
-        lines.push('- Top-level type: ' + analysis.topLevelType);
-
-        if (analysis.topLevelKeys.length > 0) {
-          lines.push('- Top-level keys: ' + analysis.topLevelKeys.join(', '));
-        } else {
-          lines.push('- Top-level keys: none');
-        }
-
-        lines.push('- Video IDs found: ' + analysis.videoIds.length);
-
-        if (analysis.videoIds.length > 0) {
-          lines.push('');
-          lines.push('First detected IDs:');
-          lines.push('');
-          for (const id of analysis.videoIds.slice(0, 50)) {
-            lines.push('- ' + id);
-          }
-        }
-      } else {
-        lines.push('- Parse error: ' + analysis.parseError);
-        lines.push('');
-        lines.push('Preview:');
-        lines.push('');
-        addCodeBlock(lines, analysis.preview);
+        size = 'unknown';
       }
 
-      lines.push('');
+      addLine(lines, '- `' + filePath + '` - `' + size + ' bytes`');
     }
   }
 
-  lines.push('## Directory tree snapshot');
-  lines.push('');
-  addCodeBlock(lines, runCommandCapture('find . -maxdepth 4 -type f | sort'));
-  lines.push('');
+  addBlank(lines);
 
-  writeReport(lines);
+  addLine(lines, '## JSON analysis');
+  addBlank(lines);
 
-  console.log('Debug report written to: ' + REPORT_FILE);
-
-  if (jsonAfter.length === 0) {
-    console.error('No JSON files found in output directory after scraping.');
-    process.exit(1);
-  }
-}
-
-main();
+  if (json
