@@ -9,80 +9,118 @@ if (!username) {
 }
 
 const outputDir = path.join(process.cwd(), "output");
-const inputFile = path.join(outputDir, `${username}_posts.json`);
 
-if (!fs.existsSync(inputFile)) {
-  console.error(`Could not find scraper output file: ${inputFile}`);
-  console.error("Files in output directory:");
-
-  if (fs.existsSync(outputDir)) {
-    console.error(fs.readdirSync(outputDir).join("\n"));
-  }
-
+if (!fs.existsSync(outputDir)) {
+  console.error(`Output directory does not exist: ${outputDir}`);
   process.exit(1);
 }
 
-const raw = fs.readFileSync(inputFile, "utf8");
-const data = JSON.parse(raw);
+const files = fs.readdirSync(outputDir);
+
+console.log("Files found in output directory:");
+for (const file of files) {
+  console.log(`- ${file}`);
+}
+
+const jsonFiles = files.filter((file) => file.endsWith(".json"));
+
+if (jsonFiles.length === 0) {
+  console.error("No JSON files found in output directory.");
+  process.exit(1);
+}
 
 /**
- * The scraper output shape can vary by version.
- * This function tries common locations where post arrays may exist.
+ * Prefer a JSON file that contains the username or posts in the name.
+ * If none match, use the first JSON file.
  */
-function findPosts(value) {
+const preferredFile =
+  jsonFiles.find((file) => file.includes(username) && file.includes("posts")) ||
+  jsonFiles.find((file) => file.includes(username)) ||
+  jsonFiles.find((file) => file.includes("posts")) ||
+  jsonFiles[0];
+
+const inputFile = path.join(outputDir, preferredFile);
+
+console.log(`Using input file: ${inputFile}`);
+
+let data;
+
+try {
+  const raw = fs.readFileSync(inputFile, "utf8");
+  data = JSON.parse(raw);
+} catch (error) {
+  console.error(`Failed to read or parse JSON file: ${inputFile}`);
+  console.error(error);
+  process.exit(1);
+}
+
+/**
+ * Recursively search for TikTok-like video IDs.
+ *
+ * Why recursive?
+ * Different versions of scrapers often structure output differently.
+ * Instead of depending on one exact JSON shape, we walk through the object
+ * and collect likely post IDs wherever they appear.
+ */
+function collectIds(value, ids = []) {
+  if (!value) {
+    return ids;
+  }
+
   if (Array.isArray(value)) {
-    return value;
+    for (const item of value) {
+      collectIds(item, ids);
+    }
+
+    return ids;
   }
 
-  if (!value || typeof value !== "object") {
-    return [];
-  }
+  if (typeof value === "object") {
+    const possibleIdKeys = [
+      "id",
+      "videoId",
+      "itemId",
+      "aweme_id",
+      "awemeId",
+    ];
 
-  const possibleKeys = [
-    "collector",
-    "posts",
-    "items",
-    "data",
-    "videos",
-  ];
+    for (const key of possibleIdKeys) {
+      const candidate = value[key];
 
-  for (const key of possibleKeys) {
-    if (Array.isArray(value[key])) {
-      return value[key];
+      if (
+        typeof candidate === "string" ||
+        typeof candidate === "number"
+      ) {
+        const stringId = String(candidate);
+
+        /**
+         * TikTok video IDs are usually long numeric strings.
+         * This filter avoids collecting unrelated tiny IDs.
+         */
+        if (/^\d{10,}$/.test(stringId)) {
+          ids.push(stringId);
+        }
+      }
+    }
+
+    for (const nestedValue of Object.values(value)) {
+      collectIds(nestedValue, ids);
     }
   }
 
-  return [];
+  return ids;
 }
 
-/**
- * TikTok metadata fields can also vary by scraper version.
- * We try several likely ID fields.
- */
-function getVideoId(post) {
-  if (!post || typeof post !== "object") {
-    return null;
-  }
-
-  return (
-    post.id ||
-    post.videoId ||
-    post.itemId ||
-    post.aweme_id ||
-    post.awemeId ||
-    null
-  );
-}
-
-const posts = findPosts(data);
-
-const ids = posts
-  .map(getVideoId)
-  .filter(Boolean)
-  .map(String);
+const ids = collectIds(data);
 
 // Remove duplicates while preserving order.
 const uniqueIds = [...new Set(ids)];
+
+if (uniqueIds.length === 0) {
+  console.error("No video IDs were found in the JSON output.");
+  console.error("This may mean the scraper output structure is different, or TikTok returned empty data.");
+  process.exit(1);
+}
 
 const txtOutput = path.join(outputDir, `${username}_video_ids.txt`);
 const jsonOutput = path.join(outputDir, `${username}_video_ids.json`);
@@ -90,7 +128,6 @@ const jsonOutput = path.join(outputDir, `${username}_video_ids.json`);
 fs.writeFileSync(txtOutput, uniqueIds.join("\n") + "\n");
 fs.writeFileSync(jsonOutput, JSON.stringify(uniqueIds, null, 2));
 
-console.log(`Found ${posts.length} posts.`);
 console.log(`Extracted ${uniqueIds.length} unique video IDs.`);
 console.log(`Wrote: ${txtOutput}`);
 console.log(`Wrote: ${jsonOutput}`);
