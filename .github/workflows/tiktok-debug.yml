@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       username:
-        description: "TikTok username (without @)"
+        description: "TikTok username without @"
         required: true
         default: "tiktok"
       number:
@@ -12,8 +12,12 @@ on:
         required: true
         default: "30"
 
+permissions:
+  contents: read
+
 jobs:
   debug:
+    name: Run TikTok debug collector
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -26,26 +30,108 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Show environment
+      - name: Prepare debug folders
+        shell: bash
         run: |
-          echo "Node: $(node -v)"
-          echo "npm: $(npm -v)"
-          echo "Runner: $(uname -a)"
+          mkdir -p debug-report
+          mkdir -p output
+
+      - name: Show environment
+        shell: bash
+        run: |
+          {
+            echo "Node:"
+            node -v
+            echo ""
+            echo "NPM:"
+            npm -v
+            echo ""
+            echo "PWD:"
+            pwd
+            echo ""
+            echo "Files:"
+            find . -maxdepth 4 -type f | sort
+          } | tee debug-report/environment.log
 
       - name: Install TikTok scraper
+        shell: bash
         run: |
-          npm install -g tiktok-scraper
-          echo "tiktok-scraper version:"
-          tiktok-scraper --version || true
+          set +e
+
+          npm install -g tiktok-scraper > debug-report/npm-install.stdout.txt 2> debug-report/npm-install.stderr.txt
+          INSTALL_EXIT=$?
+
+          echo "npm install exit code: $INSTALL_EXIT" | tee debug-report/npm-install.exit.txt
+
+          echo "STDOUT:"
+          cat debug-report/npm-install.stdout.txt || true
+
+          echo "STDERR:"
+          cat debug-report/npm-install.stderr.txt || true
+
+          echo "Checking tiktok-scraper version..."
+          tiktok-scraper --version > debug-report/tiktok-scraper-version.stdout.txt 2> debug-report/tiktok-scraper-version.stderr.txt
+          VERSION_EXIT=$?
+
+          echo "tiktok-scraper --version exit code: $VERSION_EXIT" | tee debug-report/tiktok-scraper-version.exit.txt
+
+          cat debug-report/tiktok-scraper-version.stdout.txt || true
+          cat debug-report/tiktok-scraper-version.stderr.txt || true
+
+          exit 0
+
+      - name: Save collector source with line numbers
+        if: always()
+        shell: bash
+        run: |
+          echo "Collector source with line numbers:" > debug-report/collector-source-numbered.txt
+
+          if [ -f scripts/collect-tiktok-debug.js ]; then
+            nl -ba scripts/collect-tiktok-debug.js >> debug-report/collector-source-numbered.txt
+          else
+            echo "scripts/collect-tiktok-debug.js was not found" >> debug-report/collector-source-numbered.txt
+          fi
+
+          cat debug-report/collector-source-numbered.txt
 
       - name: Check collector syntax
-        run: node --check scripts/collect-tiktok-debug.js
+        shell: bash
+        run: |
+          set +e
+
+          node --check scripts/collect-tiktok-debug.js > debug-report/node-check.stdout.txt 2> debug-report/node-check.stderr.txt
+          CHECK_EXIT=$?
+
+          echo "node --check exit code: $CHECK_EXIT" | tee debug-report/node-check.exit.txt
+
+          echo "STDOUT:"
+          cat debug-report/node-check.stdout.txt || true
+
+          echo "STDERR:"
+          cat debug-report/node-check.stderr.txt || true
+
+          exit "$CHECK_EXIT"
 
       - name: Run TikTok debug collector
+        shell: bash
+        env:
+          TIKTOK_USERNAME: ${{ github.event.inputs.username }}
+          TIKTOK_NUMBER: ${{ github.event.inputs.number }}
         run: |
-          node scripts/collect-tiktok-debug.js \
-            "${{ github.event.inputs.username }}" \
-            "${{ github.event.inputs.number }}"
+          set +e
+
+          node scripts/collect-tiktok-debug.js "$TIKTOK_USERNAME" "$TIKTOK_NUMBER" > debug-report/collector.stdout.txt 2> debug-report/collector.stderr.txt
+          COLLECTOR_EXIT=$?
+
+          echo "collector exit code: $COLLECTOR_EXIT" | tee debug-report/collector.exit.txt
+
+          echo "STDOUT:"
+          cat debug-report/collector.stdout.txt || true
+
+          echo "STDERR:"
+          cat debug-report/collector.stderr.txt || true
+
+          exit "$COLLECTOR_EXIT"
 
       - name: Upload debug artifacts
         if: always()
