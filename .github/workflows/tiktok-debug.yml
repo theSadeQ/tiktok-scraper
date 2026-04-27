@@ -4,388 +4,253 @@ on:
   workflow_dispatch:
     inputs:
       username:
-        description: "TikTok username to scrape/debug"
+        description: "TikTok username"
         required: true
         default: "lilkassb"
-
       count:
-        description: "Number of posts to request"
+        description: "Number of videos to request"
         required: true
         default: "30"
 
-  push:
-    branches:
-      - main
-      - master
-
 jobs:
-  tiktok-debug:
-    name: Run TikTok debug collector
+  debug:
     runs-on: ubuntu-latest
-
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     env:
-      TIKTOK_USERNAME: ${{ github.event.inputs.username || 'lilkassb' }}
-      TIKTOK_COUNT: ${{ github.event.inputs.count || '30' }}
+      TIKTOK_USERNAME: ${{ inputs.username }}
+      TIKTOK_COUNT: ${{ inputs.count }}
       OUTPUT_DIR: output
-      DEBUG_REPORT_DIR: debug-report
+      DEBUG_DIR: debug-report
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
-
-      - name: Show repository context
-        shell: bash
-        run: |
-          echo "Repository: $GITHUB_REPOSITORY"
-          echo "Branch/ref: $GITHUB_REF"
-          echo "SHA: $GITHUB_SHA"
-          echo "Workspace: $GITHUB_WORKSPACE"
-          echo
-          echo "Files in repository root:"
-          ls -la
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Show Node and npm versions
+      - name: Run debug process
         shell: bash
         run: |
-          echo "Node version:"
-          node --version
+          set +e
 
-          echo "npm version:"
-          npm --version
-
-      - name: Prepare debug directories
-        shell: bash
-        run: |
           mkdir -p "$OUTPUT_DIR"
-          mkdir -p "$DEBUG_REPORT_DIR"
+          mkdir -p "$DEBUG_DIR"
 
-          echo "Prepared directories:"
-          ls -la
+          STATUS_FILE="$DEBUG_DIR/status.txt"
+          REPORT_FILE="$DEBUG_DIR/workflow-report.md"
 
-      - name: Verify collector file exists
-        shell: bash
-        run: |
-          echo "Checking scripts/collect-tiktok-debug.js..."
-
-          if [ ! -f "scripts/collect-tiktok-debug.js" ]; then
-            echo "::error::Missing scripts/collect-tiktok-debug.js"
-            exit 1
-          fi
-
-          echo "Collector file exists."
-          echo "Line count:"
-          wc -l scripts/collect-tiktok-debug.js
-
-          echo
-          echo "Last 40 lines of collector:"
-          tail -n 40 scripts/collect-tiktok-debug.js
-
-      - name: Save numbered collector source for artifact
-        if: always()
-        shell: bash
-        run: |
-          mkdir -p "$DEBUG_REPORT_DIR"
-
-          if [ -f "scripts/collect-tiktok-debug.js" ]; then
-            nl -ba scripts/collect-tiktok-debug.js > "$DEBUG_REPORT_DIR/collector-source-numbered.txt"
-          else
-            echo "scripts/collect-tiktok-debug.js was not found" > "$DEBUG_REPORT_DIR/collector-source-numbered.txt"
-          fi
-
-      - name: Syntax check collector
-        id: syntax_check
-        shell: bash
-        run: |
-          set +e
-
-          echo "Running syntax check:"
-          echo "node --check scripts/collect-tiktok-debug.js"
-
-          node --check scripts/collect-tiktok-debug.js > "$DEBUG_REPORT_DIR/node-check.stdout.txt" 2> "$DEBUG_REPORT_DIR/node-check.stderr.txt"
-          code=$?
-
-          echo "syntax_exit_code=$code" >> "$GITHUB_OUTPUT"
-
-          echo
-          echo "Syntax check exit code: $code"
-
-          echo
-          echo "STDOUT:"
-          cat "$DEBUG_REPORT_DIR/node-check.stdout.txt" || true
-
-          echo
-          echo "STDERR:"
-          cat "$DEBUG_REPORT_DIR/node-check.stderr.txt" || true
-
-          # Do not fail immediately.
-          # We want artifact upload to happen first.
-          exit 0
-
-      - name: Install dependencies
-        id: npm_install
-        shell: bash
-        run: |
-          set +e
-
-          echo "Installing npm dependencies..."
-
-          if [ -f "package-lock.json" ]; then
-            npm ci > "$DEBUG_REPORT_DIR/npm-install.stdout.txt" 2> "$DEBUG_REPORT_DIR/npm-install.stderr.txt"
-          else
-            npm install > "$DEBUG_REPORT_DIR/npm-install.stdout.txt" 2> "$DEBUG_REPORT_DIR/npm-install.stderr.txt"
-          fi
-
-          code=$?
-          echo "npm_install_exit_code=$code" >> "$GITHUB_OUTPUT"
-
-          echo
-          echo "npm install exit code: $code"
-
-          echo
-          echo "STDOUT:"
-          cat "$DEBUG_REPORT_DIR/npm-install.stdout.txt" || true
-
-          echo
-          echo "STDERR:"
-          cat "$DEBUG_REPORT_DIR/npm-install.stderr.txt" || true
-
-          # Do not fail immediately.
-          # Upload artifacts first.
-          exit 0
-
-      - name: Inspect tiktok-scraper command
-        id: scraper_inspect
-        shell: bash
-        run: |
-          set +e
-
-          echo "Inspecting tiktok-scraper availability..."
+          echo "0" > "$STATUS_FILE"
 
           {
-            echo "PATH:"
-            echo "$PATH"
+            echo "# TikTok Debug Report"
             echo
-
-            echo "which tiktok-scraper:"
-            which tiktok-scraper || true
-            echo
-
-            echo "npx --no-install tiktok-scraper --version:"
-            npx --no-install tiktok-scraper --version || true
-            echo
-
-            echo "npx --no-install tiktok-scraper --help:"
-            npx --no-install tiktok-scraper --help || true
-          } > "$DEBUG_REPORT_DIR/tiktok-scraper-inspect.stdout.txt" 2> "$DEBUG_REPORT_DIR/tiktok-scraper-inspect.stderr.txt"
-
-          code=$?
-          echo "scraper_inspect_exit_code=$code" >> "$GITHUB_OUTPUT"
-
-          echo "Inspect exit code: $code"
-
-          echo
-          echo "STDOUT:"
-          cat "$DEBUG_REPORT_DIR/tiktok-scraper-inspect.stdout.txt" || true
-
-          echo
-          echo "STDERR:"
-          cat "$DEBUG_REPORT_DIR/tiktok-scraper-inspect.stderr.txt" || true
-
-          exit 0
-
-      - name: Manual scraper smoke test with public account
-        id: smoke_test
-        shell: bash
-        run: |
-          set +e
-
-          mkdir -p smoke-output
-
-          echo "Running smoke test against known public account: tiktok"
-          echo "This helps determine whether the package itself works."
-
-          npx --no-install tiktok-scraper user tiktok -n 5 -t json -d smoke-output \
-            > "$DEBUG_REPORT_DIR/smoke-test.stdout.txt" \
-            2> "$DEBUG_REPORT_DIR/smoke-test.stderr.txt"
-
-          code=$?
-          echo "smoke_test_exit_code=$code" >> "$GITHUB_OUTPUT"
-
-          echo
-          echo "Smoke test exit code: $code"
-
-          echo
-          echo "Smoke test STDOUT:"
-          cat "$DEBUG_REPORT_DIR/smoke-test.stdout.txt" || true
-
-          echo
-          echo "Smoke test STDERR:"
-          cat "$DEBUG_REPORT_DIR/smoke-test.stderr.txt" || true
-
-          echo
-          echo "Smoke output files:"
-          find smoke-output -maxdepth 5 -type f -print | tee "$DEBUG_REPORT_DIR/smoke-output-files.txt" || true
-
-          exit 0
-
-      - name: Run TikTok debug collector
-        id: collector
-        shell: bash
-        run: |
-          set +e
-
-          echo "Running collector..."
-          echo "Username: $TIKTOK_USERNAME"
-          echo "Count: $TIKTOK_COUNT"
-          echo "Output dir: $OUTPUT_DIR"
-          echo "Report dir: $DEBUG_REPORT_DIR"
-
-          node scripts/collect-tiktok-debug.js \
-            > "$DEBUG_REPORT_DIR/collector.stdout.txt" \
-            2> "$DEBUG_REPORT_DIR/collector.stderr.txt"
-
-          code=$?
-          echo "collector_exit_code=$code" >> "$GITHUB_OUTPUT"
-
-          echo
-          echo "collector exit code: $code"
-
-          echo
-          echo "STDOUT:"
-          cat "$DEBUG_REPORT_DIR/collector.stdout.txt" || true
-
-          echo
-          echo "STDERR:"
-          cat "$DEBUG_REPORT_DIR/collector.stderr.txt" || true
-
-          echo
-          echo "Output files after collector:"
-          find "$OUTPUT_DIR" -maxdepth 5 -type f -print | tee "$DEBUG_REPORT_DIR/output-files-after-collector.txt" || true
-
-          echo
-          echo "Debug report files:"
-          find "$DEBUG_REPORT_DIR" -maxdepth 5 -type f -print || true
-
-          # Important:
-          # Do not fail here. Artifact upload must happen first.
-          exit 0
-
-      - name: Create workflow summary report
-        if: always()
-        shell: bash
-        run: |
-          mkdir -p "$DEBUG_REPORT_DIR"
-
-          {
-            echo "# TikTok Debug Workflow Summary"
-            echo
-            echo "## Inputs"
+            echo "## Basic Info"
             echo
             echo "- Username: \`$TIKTOK_USERNAME\`"
             echo "- Count: \`$TIKTOK_COUNT\`"
-            echo "- Output directory: \`$OUTPUT_DIR\`"
-            echo "- Debug report directory: \`$DEBUG_REPORT_DIR\`"
+            echo "- Node: \`$(node --version)\`"
+            echo "- npm: \`$(npm --version)\`"
+            echo "- Working directory: \`$(pwd)\`"
             echo
-            echo "## Step Exit Codes"
-            echo
-            echo "- Syntax check: \`${{ steps.syntax_check.outputs.syntax_exit_code || 'unknown' }}\`"
-            echo "- npm install: \`${{ steps.npm_install.outputs.npm_install_exit_code || 'unknown' }}\`"
-            echo "- scraper inspect: \`${{ steps.scraper_inspect.outputs.scraper_inspect_exit_code || 'unknown' }}\`"
-            echo "- smoke test: \`${{ steps.smoke_test.outputs.smoke_test_exit_code || 'unknown' }}\`"
-            echo "- collector: \`${{ steps.collector.outputs.collector_exit_code || 'unknown' }}\`"
-            echo
-            echo "## Output Directory Files"
-            echo
-            echo '
-```text'
-find "$OUTPUT_DIR" -maxdepth 5 -type f -print 2>/dev/null || true
-echo '
-```'
-            echo
-            echo "## Debug Report Files"
-            echo
-            echo '
-```text'
-find "$DEBUG_REPORT_DIR" -maxdepth 5 -type f -print 2>/dev/null || true
-echo '
-```'
-          } > "$DEBUG_REPORT_DIR/workflow-summary.md"
+          } > "$REPORT_FILE"
 
-          cat "$DEBUG_REPORT_DIR/workflow-summary.md"
+          echo "Repository files:"
+          ls -la > "$DEBUG_DIR/root-files.txt" 2>&1
 
-      - name: Upload TikTok debug artifacts
+          echo "Checking collector file..."
+
+          if [ ! -f "scripts/collect-tiktok-debug.js" ]; then
+            echo "Missing scripts/collect-tiktok-debug.js" > "$DEBUG_DIR/error.txt"
+            echo "1" > "$STATUS_FILE"
+
+            {
+              echo
+              echo "## Error"
+              echo
+              echo "\`scripts/collect-tiktok-debug.js\` was not found."
+            } >> "$REPORT_FILE"
+
+            exit 0
+          fi
+
+          wc -l scripts/collect-tiktok-debug.js > "$DEBUG_DIR/collector-line-count.txt" 2>&1
+          nl -ba scripts/collect-tiktok-debug.js > "$DEBUG_DIR/collector-source-numbered.txt" 2>&1
+
+          echo "Running JS syntax check..."
+
+          node --check scripts/collect-tiktok-debug.js \
+            > "$DEBUG_DIR/node-check.stdout.txt" \
+            2> "$DEBUG_DIR/node-check.stderr.txt"
+
+          SYNTAX_CODE=$?
+
+          {
+            echo
+            echo "## Syntax Check"
+            echo
+            echo "- Exit code: \`$SYNTAX_CODE\`"
+          } >> "$REPORT_FILE"
+
+          if [ "$SYNTAX_CODE" != "0" ]; then
+            echo "JavaScript syntax check failed" > "$DEBUG_DIR/error.txt"
+            echo "1" > "$STATUS_FILE"
+            exit 0
+          fi
+
+          echo "Installing tiktok-scraper globally..."
+
+          npm install -g tiktok-scraper \
+            > "$DEBUG_DIR/npm-install.stdout.txt" \
+            2> "$DEBUG_DIR/npm-install.stderr.txt"
+
+          NPM_CODE=$?
+
+          {
+            echo
+            echo "## npm Install"
+            echo
+            echo "- Exit code: \`$NPM_CODE\`"
+          } >> "$REPORT_FILE"
+
+          if [ "$NPM_CODE" != "0" ]; then
+            echo "npm install -g tiktok-scraper failed" > "$DEBUG_DIR/error.txt"
+            echo "1" > "$STATUS_FILE"
+            exit 0
+          fi
+
+          echo "Checking tiktok-scraper command..."
+
+          {
+            echo "Command path:"
+            command -v tiktok-scraper || true
+            echo
+            echo "Version:"
+            tiktok-scraper --version || true
+            echo
+            echo "Help:"
+            tiktok-scraper --help || true
+          } > "$DEBUG_DIR/tiktok-scraper-info.txt" 2>&1
+
+          echo "Running smoke test with public TikTok account..."
+
+          mkdir -p smoke-output
+
+          tiktok-scraper user tiktok -n 5 -t json -d smoke-output \
+            > "$DEBUG_DIR/smoke-test.stdout.txt" \
+            2> "$DEBUG_DIR/smoke-test.stderr.txt"
+
+          SMOKE_CODE=$?
+
+          find smoke-output -maxdepth 5 -type f -print \
+            > "$DEBUG_DIR/smoke-output-files.txt" \
+            2>&1
+
+          SMOKE_JSON_COUNT=$(find smoke-output -type f -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+
+          {
+            echo
+            echo "## Smoke Test"
+            echo
+            echo "- Account: \`tiktok\`"
+            echo "- Exit code: \`$SMOKE_CODE\`"
+            echo "- JSON files created: \`$SMOKE_JSON_COUNT\`"
+          } >> "$REPORT_FILE"
+
+          echo "Running your collector..."
+
+          node scripts/collect-tiktok-debug.js \
+            > "$DEBUG_DIR/collector.stdout.txt" \
+            2> "$DEBUG_DIR/collector.stderr.txt"
+
+          COLLECTOR_CODE=$?
+
+          find "$OUTPUT_DIR" -maxdepth 5 -type f -print \
+            > "$DEBUG_DIR/output-files.txt" \
+            2>&1
+
+          OUTPUT_JSON_COUNT=$(find "$OUTPUT_DIR" -type f -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+
+          {
+            echo
+            echo "## Collector"
+            echo
+            echo "- Exit code: \`$COLLECTOR_CODE\`"
+            echo "- JSON files created: \`$OUTPUT_JSON_COUNT\`"
+          } >> "$REPORT_FILE"
+
+          if [ "$COLLECTOR_CODE" != "0" ]; then
+            echo "Collector failed with exit code $COLLECTOR_CODE" > "$DEBUG_DIR/error.txt"
+            echo "1" > "$STATUS_FILE"
+            exit 0
+          fi
+
+          if [ "$OUTPUT_JSON_COUNT" = "0" ]; then
+            echo "Collector ran but produced no JSON files" > "$DEBUG_DIR/error.txt"
+            echo "1" > "$STATUS_FILE"
+
+            {
+              echo
+              echo "## Final Result"
+              echo
+              echo "Collector ran, but no JSON files were created."
+              echo
+              echo "This usually means either:"
+              echo
+              echo "1. TikTok blocked the scraper."
+              echo "2. The target account has no accessible public videos."
+              echo "3. The \`tiktok-scraper\` npm package is broken/outdated."
+            } >> "$REPORT_FILE"
+
+            exit 0
+          fi
+
+          {
+            echo
+            echo "## Final Result"
+            echo
+            echo "Success. JSON files were created."
+          } >> "$REPORT_FILE"
+
+          echo "0" > "$STATUS_FILE"
+          exit 0
+
+      - name: Upload debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tiktok-debug-artifacts
-          if-no-files-found: warn
-          retention-days: 7
           path: |
             debug-report/**
             output/**
             smoke-output/**
             scripts/collect-tiktok-debug.js
-            package.json
-            package-lock.json
+          if-no-files-found: warn
+          retention-days: 7
 
-      - name: Fail if syntax check failed
+      - name: Fail job if debug failed
         if: always()
         shell: bash
         run: |
-          code="${{ steps.syntax_check.outputs.syntax_exit_code }}"
-
-          if [ -z "$code" ]; then
-            echo "::error::Syntax check did not produce an exit code."
+          if [ ! -f "debug-report/status.txt" ]; then
+            echo "debug-report/status.txt missing"
             exit 1
           fi
 
-          if [ "$code" != "0" ]; then
-            echo "::error::JavaScript syntax check failed. See debug-report/node-check.stderr.txt in artifacts."
-            exit "$code"
-          fi
+          STATUS="$(cat debug-report/status.txt)"
 
-          echo "Syntax check passed."
-
-      - name: Fail if npm install failed
-        if: always()
-        shell: bash
-        run: |
-          code="${{ steps.npm_install.outputs.npm_install_exit_code }}"
-
-          if [ -z "$code" ]; then
-            echo "::error::npm install did not produce an exit code."
+          if [ "$STATUS" != "0" ]; then
+            echo "TikTok debug failed."
+            echo
+            echo "Main error:"
+            cat debug-report/error.txt || true
+            echo
+            echo "Artifacts were uploaded as: tiktok-debug-artifacts"
+            echo "Download them and check debug-report/workflow-report.md"
             exit 1
           fi
 
-          if [ "$code" != "0" ]; then
-            echo "::error::npm install failed. See debug-report/npm-install.stderr.txt in artifacts."
-            exit "$code"
-          fi
-
-          echo "npm install passed."
-
-      - name: Fail if collector failed
-        if: always()
-        shell: bash
-        run: |
-          code="${{ steps.collector.outputs.collector_exit_code }}"
-
-          if [ -z "$code" ]; then
-            echo "::error::Collector did not produce an exit code."
-            exit 1
-          fi
-
-          if [ "$code" != "0" ]; then
-            echo "::error::Collector failed with exit code $code."
-            echo "::error::Artifacts were uploaded. Check debug-report/report.md, collector.stdout.txt, and collector.stderr.txt."
-            exit "$code"
-          fi
-
-          echo "Collector passed."
+          echo "TikTok debug passed."
