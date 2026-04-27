@@ -41,6 +41,7 @@ fs.mkdirSync(debugDir, { recursive: true });
 const reportLines = [];
 
 function writeReport(line = "") {
+  // Ensure line is a string before pushing
   reportLines.push(String(line));
 }
 
@@ -92,7 +93,8 @@ function walkFiles(startDir, ignoreDirs = new Set([".git", "node_modules"])) {
 
     try {
       entries = fs.readdirSync(currentDir, { withFileTypes: true });
-    } catch {
+    } catch (e) {
+      console.error(`Error reading directory ${currentDir}: ${e.message}`);
       return;
     }
 
@@ -148,6 +150,10 @@ function safeJsonParse(filePath) {
  * This helper recursively searches for likely TikTok video IDs.
  */
 function collectVideoIds(value, ids = new Set()) {
+  if (value === null || typeof value === "undefined") {
+    return ids;
+  }
+
   if (Array.isArray(value)) {
     for (const item of value) {
       collectVideoIds(item, ids);
@@ -156,13 +162,14 @@ function collectVideoIds(value, ids = new Set()) {
     return ids;
   }
 
-  if (!value || typeof value !== "object") {
+  if (typeof value !== "object") {
     return ids;
   }
 
   for (const [key, childValue] of Object.entries(value)) {
     const normalizedKey = key.toLowerCase();
 
+    // Heuristic 1: Check for common ID keys and string values
     if (
       typeof childValue === "string" &&
       /^\d{10,}$/.test(childValue) &&
@@ -174,11 +181,14 @@ function collectVideoIds(value, ids = new Set()) {
         "aweme_id",
         "itemid",
         "item_id",
+        "id_str", // Added common variations
+        "uuid",
       ].includes(normalizedKey)
     ) {
       ids.add(childValue);
     }
 
+    // Heuristic 2: Check for common ID keys and numeric values (convert to string)
     if (
       typeof childValue === "number" &&
       Number.isFinite(childValue) &&
@@ -191,11 +201,14 @@ function collectVideoIds(value, ids = new Set()) {
         "aweme_id",
         "itemid",
         "item_id",
+        "id_str",
+        "uuid",
       ].includes(normalizedKey)
     ) {
       ids.add(String(childValue));
     }
 
+    // Recurse into nested objects/arrays
     collectVideoIds(childValue, ids);
   }
 
@@ -206,17 +219,19 @@ function countObjects(value) {
   let count = 0;
 
   function visit(item) {
+    if (item === null || typeof item === "undefined") {
+      return;
+    }
+
     if (Array.isArray(item)) {
       for (const child of item) {
         visit(child);
       }
-
       return;
     }
 
-    if (item && typeof item === "object") {
-      count += 1;
-
+    if (typeof item === "object") {
+      count += 1; // Count the object itself
       for (const child of Object.values(item)) {
         visit(child);
       }
@@ -266,7 +281,9 @@ function analyzeJsonFile(fileInfo) {
 function writeCommandResult(title, result) {
   writeReport(`### ${title}`);
   writeReport("");
-  writeReport(`Command: \`${result.command} ${result.args.join(" ")}\``);
+  writeReport(`\`\`\`bash
+${result.command} ${result.args.join(" ")}
+\`\`\``);
   writeReport(`Exit code: \`${result.status}\``);
 
   if (result.signal) {
@@ -296,4 +313,172 @@ writeReport("
   if (result.stderr.trim()) {
     writeReport("");
     writeReport("stderr:");
-    writeReport
+    writeReport("
+```text");
+writeReport(result.stderr.trim());
+writeReport("
+```");
+  }
+}
+
+async function main() {
+  writeReport("# TikTok Scraper Debug Report");
+  writeReport("");
+  writeReport(`Generated on: ${new Date().toISOString()}`);
+  writeReport("");
+
+  // 1. Environment and Tool Versions
+  writeReport("## Environment and Tool Versions");
+  writeReport("");
+
+  const nodeVersion = runCommand("node", ["-v"]);
+  writeCommandResult("Node.js Version", nodeVersion);
+
+  const npmVersion = runCommand("npm", ["-v"]);
+  writeCommandResult("npm Version", npmVersion);
+
+  const tiktokScraperVersion = runCommand("tiktok-scraper", ["--version"]);
+  writeCommandResult("tiktok-scraper Version", tiktokScraperVersion);
+
+  // 2. Files before scraping
+  writeReport("");
+  writeReport("## Files Before Scraping");
+  writeReport("");
+
+  const initialJsonFiles = findJsonFiles();
+  if (initialJsonFiles.length > 0) {
+    writeReport("Found the following JSON files before scraping:");
+    writeReport("
+```");
+initialJsonFiles.forEach(f => writeReport(`- ${f.relativePath} (${f.size} bytes)`));
+writeReport("
+```");
+  } else {
+    writeReport("No JSON files found before scraping.");
+  }
+
+  // 3. Run tiktok-scraper command
+  writeReport("");
+  writeReport("## Running TikTok Scraper");
+  writeReport("");
+
+  const scraperArgs = [username];
+  if (number !== "0") {
+    scraperArgs.push("--number", number);
+  }
+  scraperArgs.push("--filetype", "json");
+  scraperArgs.push("--filepath", "./output"); // Explicitly set to output
+  scraperArgs.push("--filename", `${username}_posts`);
+
+  const scraperCommand = "tiktok-scraper";
+  const scraperResult = runCommand(scraperCommand, scraperArgs);
+  writeCommandResult("tiktok-scraper Execution", scraperResult);
+
+  // 4. Files after scraping
+  writeReport("");
+  writeReport("## Files After Scraping");
+  writeReport("");
+
+  const finalJsonFiles = findJsonFiles();
+
+  if (finalJsonFiles.length > 0) {
+    const foundInOutput = finalJsonFiles.filter(f => f.relativePath.startsWith("output/"));
+    const foundElsewhere = finalJsonFiles.filter(f => !f.relativePath.startsWith("output/"));
+
+    writeReport(`Found a total of ${finalJsonFiles.length} JSON files after scraping.`);
+
+    if (foundInOutput.length > 0) {
+      writeReport(`\n### JSON files found in './output/': ${foundInOutput.length}`);
+      writeReport("
+```");
+foundInOutput.forEach(f => writeReport(`- ${f.relativePath} (${f.size} bytes)`));
+writeReport("
+```");
+    } else {
+      writeReport("\nNo JSON files were found in the './output/' directory.");
+    }
+
+    if (foundElsewhere.length > 0) {
+      writeReport(`\n### JSON files found ELSEWHERE in the repository: ${foundElsewhere.length}`);
+      writeReport("
+```");
+foundElsewhere.forEach(f => writeReport(`- ${f.relativePath} (${f.size} bytes)`));
+writeReport("
+```");
+      writeReport("\n**Note:** The scraper may have written files outside of the expected './output/' directory.");
+    }
+  } else {
+    writeReport("No JSON files found anywhere in the repository after scraping.");
+  }
+
+  // 5. Analyze JSON files for video IDs
+  writeReport("");
+  writeReport("## Analysis of JSON Files");
+  writeReport("");
+
+  const analyzedFiles = finalJsonFiles.map(analyzeJsonFile);
+
+  if (analyzedFiles.length === 0) {
+    writeReport("No JSON files to analyze.");
+  } else {
+    let totalPossibleIds = 0;
+    let totalObjects = 0;
+
+    analyzedFiles.forEach(fileInfo => {
+      writeReport(`### Analysis of: \`${fileInfo.relativePath}\``);
+      writeReport("");
+      writeReport(`- Valid JSON: ${fileInfo.validJson ? "Yes" : "No"}`);
+      if (!fileInfo.validJson) {
+        writeReport(`- Parse Error: \`${fileInfo.parseError}\``);
+      } else {
+        writeReport(`- Root Type: \`${fileInfo.rootType}\``);
+        writeReport(`- Object Count: \`${fileInfo.objectCount}\``);
+        totalObjects += fileInfo.objectCount;
+
+        if (fileInfo.possibleVideoIds.length > 0) {
+          writeReport(`- Possible Video IDs found: ${fileInfo.possibleVideoIds.length}`);
+          // Optionally list some IDs if there aren't too many
+          if (fileInfo.possibleVideoIds.length <= 5) {
+            writeReport("  - IDs: " + fileInfo.possibleVideoIds.join(", "));
+          } else {
+            writeReport("  - (Too many to list)");
+          }
+          totalPossibleIds += fileInfo.possibleVideoIds.length;
+        } else {
+          writeReport("- Possible Video IDs found: 0");
+        }
+      }
+      writeReport("");
+    });
+
+    writeReport("---");
+    writeReport("### Summary of Analysis");
+    writeReport("");
+    writeReport(`- Total JSON files analyzed: ${analyzedFiles.length}`);
+    writeReport(`- Total objects found across analyzed JSONs: ${totalObjects}`);
+    writeReport(`- Total possible TikTok video IDs found: ${totalPossibleIds}`);
+  }
+
+  // 6. Final Report Save
+  saveReport();
+  writeReport(`Debug report saved to: \`${path.relative(repoRoot, reportPath)}\``);
+  console.log(`Debug report generated at: ${reportPath}`);
+}
+
+main().catch((error) => {
+  console.error("An unexpected error occurred during script execution:");
+  console.error(error);
+
+  // Attempt to write the error to the report
+  writeReport("## Unhandled Script Error");
+  writeReport("");
+  writeReport("An unexpected error occurred while running the debug script:");
+  writeReport("
+```text");
+  writeReport(String(error.stack || error));
+  writeReport("
+```");
+  saveReport(); // Save report even if there's an error
+
+  process.exitCode = 1; // Indicate failure
+});
