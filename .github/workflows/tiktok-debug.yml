@@ -1,448 +1,59 @@
-      - name: Create debug collector script
+name: TikTok Debug
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: "TikTok username (without @)"
+        required: true
+        default: "tiktok"
+      number:
+        description: "Number of videos to scrape"
+        required: true
+        default: "30"
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Show environment
         run: |
-          mkdir -p scripts
-          cat > scripts/collect-tiktok-debug.js <<'EOF'
-          const fs = require('fs');
-          const path = require('path');
-          const { spawnSync } = require('child_process');
-
-          const username = process.argv[2];
-          const number = process.argv[3] || '0';
-
-          if (!username) {
-            console.error('Missing username.');
-            console.error('Usage: node scripts/collect-tiktok-debug.js <username> <number>');
-            process.exit(1);
-          }
-
-          const repoRoot = process.cwd();
-          const outputDir = path.join(repoRoot, 'output');
-          const debugDir = path.join(repoRoot, 'debug-report');
-          const reportPath = path.join(debugDir, 'report.md');
-
-          fs.mkdirSync(outputDir, { recursive: true });
-          fs.mkdirSync(debugDir, { recursive: true });
-
-          const reportLines = [];
-
-          function writeReport(line) {
-            if (line === undefined) line = '';
-            reportLines.push(String(line));
-          }
-
-          function saveReport() {
-            fs.writeFileSync(reportPath, reportLines.join('\n'), 'utf8');
-          }
-
-          function runCommand(command, args) {
-            const result = spawnSync(command, args, {
-              cwd: repoRoot,
-              encoding: 'utf8',
-              shell: false
-            });
-
-            return {
-              command: command,
-              args: args,
-              status: result.status,
-              signal: result.signal,
-              stdout: result.stdout || '',
-              stderr: result.stderr || '',
-              error: result.error ? String(result.error) : ''
-            };
-          }
-
-          function getFileSize(filePath) {
-            try {
-              return fs.statSync(filePath).size;
-            } catch (error) {
-              return 0;
-            }
-          }
-
-          function walkFiles(startDir) {
-            const ignored = new Set(['.git', 'node_modules']);
-            const files = [];
-
-            function walk(currentDir) {
-              let entries = [];
-
-              try {
-                entries = fs.readdirSync(currentDir, { withFileTypes: true });
-              } catch (error) {
-                return;
-              }
-
-              for (const entry of entries) {
-                const fullPath = path.join(currentDir, entry.name);
-
-                if (entry.isDirectory()) {
-                  if (!ignored.has(entry.name)) {
-                    walk(fullPath);
-                  }
-                } else if (entry.isFile()) {
-                  files.push(fullPath);
-                }
-              }
-            }
-
-            walk(startDir);
-            return files;
-          }
-
-          function findJsonFiles() {
-            return walkFiles(repoRoot)
-              .filter(function(file) {
-                return file.toLowerCase().endsWith('.json');
-              })
-              .map(function(file) {
-                return {
-                  absolutePath: file,
-                  relativePath: path.relative(repoRoot, file),
-                  size: getFileSize(file)
-                };
-              })
-              .sort(function(a, b) {
-                return a.relativePath.localeCompare(b.relativePath);
-              });
-          }
-
-          function safeJsonParse(filePath) {
-            try {
-              const content = fs.readFileSync(filePath, 'utf8');
-              return {
-                ok: true,
-                value: JSON.parse(content),
-                error: ''
-              };
-            } catch (error) {
-              return {
-                ok: false,
-                value: null,
-                error: String(error.message || error)
-              };
-            }
-          }
-
-          function collectVideoIds(value, ids) {
-            if (!ids) ids = new Set();
-
-            if (Array.isArray(value)) {
-              for (const item of value) {
-                collectVideoIds(item, ids);
-              }
-              return ids;
-            }
-
-            if (!value || typeof value !== 'object') {
-              return ids;
-            }
-
-            const idKeys = new Set([
-              'id',
-              'videoid',
-              'video_id',
-              'awemeid',
-              'aweme_id',
-              'itemid',
-              'item_id',
-              'id_str'
-            ]);
-
-            for (const key of Object.keys(value)) {
-              const childValue = value[key];
-              const normalizedKey = key.toLowerCase();
-
-              if (idKeys.has(normalizedKey)) {
-                if (typeof childValue === 'string' && /^\d{10,}$/.test(childValue)) {
-                  ids.add(childValue);
-                }
-
-                if (
-                  typeof childValue === 'number' &&
-                  Number.isFinite(childValue) &&
-                  String(childValue).length >= 10
-                ) {
-                  ids.add(String(childValue));
-                }
-              }
-
-              collectVideoIds(childValue, ids);
-            }
-
-            return ids;
-          }
-
-          function countObjects(value) {
-            let count = 0;
-
-            function visit(item) {
-              if (Array.isArray(item)) {
-                for (const child of item) {
-                  visit(child);
-                }
-                return;
-              }
-
-              if (item && typeof item === 'object') {
-                count += 1;
-                for (const child of Object.values(item)) {
-                  visit(child);
-                }
-              }
-            }
-
-            visit(value);
-            return count;
-          }
-
-          function analyzeJsonFile(fileInfo) {
-            const parsed = safeJsonParse(fileInfo.absolutePath);
-
-            if (!parsed.ok) {
-              return {
-                relativePath: fileInfo.relativePath,
-                size: fileInfo.size,
-                validJson: false,
-                parseError: parsed.error,
-                rootType: 'unknown',
-                objectCount: 0,
-                possibleVideoIds: []
-              };
-            }
-
-            const root = parsed.value;
-            const possibleVideoIds = Array.from(collectVideoIds(root));
-            const objectCount = countObjects(root);
-
-            let rootType = typeof root;
-
-            if (Array.isArray(root)) {
-              rootType = 'array(' + root.length + ')';
-            } else if (root && typeof root === 'object') {
-              rootType = 'object(' + Object.keys(root).length + ' keys)';
-            }
-
-            return {
-              relativePath: fileInfo.relativePath,
-              size: fileInfo.size,
-              validJson: true,
-              parseError: '',
-              rootType: rootType,
-              objectCount: objectCount,
-              possibleVideoIds: possibleVideoIds
-            };
-          }
-
-          function writeCodeBlock(label, text) {
-            writeReport(label);
-            writeReport('
-```text');
-writeReport(text || '');
-writeReport('
-```');
-          }
-
-          function writeCommandResult(title, result) {
-            writeReport('### ' + title);
-            writeReport('');
-            writeReport('Command: `' + result.command + ' ' + result.args.join(' ') + '`');
-            writeReport('Exit code: `' + result.status + '`');
-
-            if (result.signal) {
-              writeReport('Signal: `' + result.signal + '`');
-            }
-
-            if (result.error) {
-              writeReport('');
-              writeCodeBlock('Error:', result.error);
-            }
-
-            if (result.stdout.trim()) {
-              writeReport('');
-              writeCodeBlock('stdout:', result.stdout.trim());
-            }
-
-            if (result.stderr.trim()) {
-              writeReport('');
-              writeCodeBlock('stderr:', result.stderr.trim());
-            }
-          }
-
-          function main() {
-            writeReport('# TikTok Scraper Debug Report');
-            writeReport('');
-            writeReport('Generated on: ' + new Date().toISOString());
-            writeReport('');
-            writeReport('Username: `' + username + '`');
-            writeReport('Requested number: `' + number + '`');
-            writeReport('');
-
-            writeReport('## Environment');
-            writeReport('');
-
-            writeCommandResult('Node.js Version', runCommand('node', ['-v']));
-            writeReport('');
-            writeCommandResult('npm Version', runCommand('npm', ['-v']));
-            writeReport('');
-            writeCommandResult('tiktok-scraper Version', runCommand('tiktok-scraper', ['--version']));
-
-            writeReport('');
-            writeReport('## JSON Files Before Scraping');
-            writeReport('');
-
-            const beforeFiles = findJsonFiles();
-
-            if (beforeFiles.length === 0) {
-              writeReport('No JSON files found before scraping.');
-            } else {
-              for (const file of beforeFiles) {
-                writeReport('- ' + file.relativePath + ' (' + file.size + ' bytes)');
-              }
-            }
-
-            writeReport('');
-            writeReport('## Running TikTok Scraper');
-            writeReport('');
-
-            const scraperArgs = [
-              'user',
-              username,
-              '--number',
-              number,
-              '--filetype',
-              'json',
-              '--filepath',
-              './output',
-              '--filename',
-              username + '_posts'
-            ];
-
-            const scraperResult = runCommand('tiktok-scraper', scraperArgs);
-            writeCommandResult('tiktok-scraper Execution', scraperResult);
-
-            writeReport('');
-            writeReport('## JSON Files After Scraping');
-            writeReport('');
-
-            const afterFiles = findJsonFiles();
-
-            if (afterFiles.length === 0) {
-              writeReport('No JSON files found after scraping.');
-            } else {
-              writeReport('Found ' + afterFiles.length + ' JSON files after scraping.');
-              writeReport('');
-
-              const outputFiles = afterFiles.filter(function(file) {
-                return file.relativePath.startsWith('output/');
-              });
-
-              const otherFiles = afterFiles.filter(function(file) {
-                return !file.relativePath.startsWith('output/');
-              });
-
-              writeReport('### Files in output/');
-              writeReport('');
-
-              if (outputFiles.length === 0) {
-                writeReport('No JSON files found in output/.');
-              } else {
-                for (const file of outputFiles) {
-                  writeReport('- ' + file.relativePath + ' (' + file.size + ' bytes)');
-                }
-              }
-
-              writeReport('');
-              writeReport('### Files elsewhere');
-              writeReport('');
-
-              if (otherFiles.length === 0) {
-                writeReport('No JSON files found elsewhere.');
-              } else {
-                for (const file of otherFiles) {
-                  writeReport('- ' + file.relativePath + ' (' + file.size + ' bytes)');
-                }
-              }
-            }
-
-            writeReport('');
-            writeReport('## JSON Analysis');
-            writeReport('');
-
-            const analyzedFiles = afterFiles.map(analyzeJsonFile);
-            const allIds = new Set();
-
-            if (analyzedFiles.length === 0) {
-              writeReport('No JSON files to analyze.');
-            } else {
-              for (const file of analyzedFiles) {
-                writeReport('### ' + file.relativePath);
-                writeReport('');
-                writeReport('- Size: `' + file.size + '` bytes');
-                writeReport('- Valid JSON: `' + (file.validJson ? 'yes' : 'no') + '`');
-
-                if (!file.validJson) {
-                  writeReport('- Parse error: `' + file.parseError + '`');
-                  writeReport('');
-                  continue;
-                }
-
-                writeReport('- Root type: `' + file.rootType + '`');
-                writeReport('- Object count: `' + file.objectCount + '`');
-                writeReport('- Possible video IDs: `' + file.possibleVideoIds.length + '`');
-
-                for (const id of file.possibleVideoIds) {
-                  allIds.add(id);
-                }
-
-                if (file.possibleVideoIds.length > 0) {
-                  writeReport('');
-                  writeReport('First IDs:');
-                  for (const id of file.possibleVideoIds.slice(0, 20)) {
-                    writeReport('- ' + id);
-                  }
-                }
-
-                writeReport('');
-              }
-            }
-
-            writeReport('');
-            writeReport('## Final Summary');
-            writeReport('');
-            writeReport('- Total JSON files after scraping: `' + afterFiles.length + '`');
-            writeReport('- Total unique possible video IDs: `' + allIds.size + '`');
-
-            const idsPath = path.join(outputDir, username + '_video_ids.txt');
-            const idsJsonPath = path.join(outputDir, username + '_video_ids.json');
-
-            fs.writeFileSync(idsPath, Array.from(allIds).join('\n') + '\n', 'utf8');
-            fs.writeFileSync(idsJsonPath, JSON.stringify(Array.from(allIds), null, 2), 'utf8');
-
-            writeReport('');
-            writeReport('Saved extracted IDs to:');
-            writeReport('- `output/' + username + '_video_ids.txt`');
-            writeReport('- `output/' + username + '_video_ids.json`');
-
-            saveReport();
-
-            console.log('Debug report generated at: ' + reportPath);
-            console.log('Extracted IDs: ' + allIds.size);
-          }
-
-          try {
-            main();
-          } catch (error) {
-            console.error(error);
-
-            writeReport('');
-            writeReport('## Script Error');
-            writeReport('');
-            writeCodeBlock('Error:', String(error.stack || error));
-
-            saveReport();
-            process.exit(1);
-          }
-          EOF
-
-          node --check scripts/collect-tiktok-debug.js
+          echo "Node: $(node -v)"
+          echo "npm: $(npm -v)"
+          echo "Runner: $(uname -a)"
+
+      - name: Install TikTok scraper
+        run: |
+          npm install -g tiktok-scraper
+          echo "tiktok-scraper version:"
+          tiktok-scraper --version || true
+
+      - name: Check collector syntax
+        run: node --check scripts/collect-tiktok-debug.js
+
+      - name: Run TikTok debug collector
+        run: |
+          node scripts/collect-tiktok-debug.js \
+            "${{ github.event.inputs.username }}" \
+            "${{ github.event.inputs.number }}"
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tiktok-debug-artifacts
+          path: |
+            debug-report/
+            output/
+            scripts/collect-tiktok-debug.js
+          if-no-files-found: warn
