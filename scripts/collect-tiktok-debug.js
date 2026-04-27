@@ -196,28 +196,33 @@ for (const [cmd, args] of envCommands) {
   writeReport("");
   writeReport(`Exit code: \`${result.status}\``);
   if (result.stdout.trim()) {
-    writeReport("stdout:");
-    writeReport("
+if (result.stdout.trim()) {
+  writeReport("stdout:");
+  writeReport("
 ```text");
-writeReport(result.stdout.trim());
-writeReport("
+  writeReport(result.stdout.trim());
+  writeReport("
 ```");
-  }
-  if (result.stderr.trim()) {
-    writeReport("stderr:");
-    writeReport("
+}
+
+if (result.stderr.trim()) {
+  writeReport("stderr:");
+  writeReport("
 ```text");
-writeReport(result.stderr.trim());
-writeReport("
+  writeReport(result.stderr.trim());
+  writeReport("
 ```");
-  }
-  if (result.error) {
-    writeReport("error:");
-    writeReport("
+}
+
+if (result.error) {
+  writeReport("error:");
+  writeReport("
 ```text");
-writeReport(result.error);
-writeReport("
+  writeReport(result.error);
+  writeReport("
 ```");
+}
+
   }
   writeReport("");
 }
